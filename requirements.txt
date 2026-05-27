@@ -1,0 +1,16 @@
+sqlalchemy
+psycopg2-binary
+pandas
+openpyxl
+scrapy
+scrapy-playwright
+playwright
+playwright-stealth
+streamlit
+requests
+beautifulsoup4
+python-dotenv
+levenshtein
+googlemaps
+httpx
+lxml

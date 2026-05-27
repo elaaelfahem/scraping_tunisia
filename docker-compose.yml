@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgis/postgis:15-3.3
+    container_name: tunisian_companies_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin_password}
+      POSTGRES_DB: ${POSTGRES_DB:-tunisian_companies}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: tunisian_companies_n8n
+    restart: always
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - NODE_ENV=production
+      - WEBHOOK_URL=http://${N8N_HOST:-localhost}:5678/
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      - db
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: ui/Dockerfile
+    container_name: tunisian_companies_ui
+    restart: always
+    ports:
+      - "8501:8501"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-admin_password}@db:5432/${POSTGRES_DB:-tunisian_companies}
+    depends_on:
+      - db
+
+  scraper:
+    build:
+      context: .
+      dockerfile: scrapers/Dockerfile
+    container_name: tunisian_companies_scraper
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-admin_password}@db:5432/${POSTGRES_DB:-tunisian_companies}
+    depends_on:
+      - db
+    volumes:
+      - ./scrapers:/app/scrapers
+      - ./core:/app/core
+
+volumes:
+  postgres_data:
+  n8n_data:
