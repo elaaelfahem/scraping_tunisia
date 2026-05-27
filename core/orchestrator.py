@@ -181,7 +181,7 @@ async def run_orchestration(
         logger.info("[Step 3/7] TunisiaYP")
         typ_scraper = TunisiaYPScraper()
         for kw in BROAD_KEYWORDS[:3]: # Limit for Yellow Pages
-            typ_results = filter_companies(typ_scraper.search(kw, city, area))
+            typ_results = filter_companies(typ_scraper.search(kw, city, area, enrich_details=True))
             for item in typ_results:
                 raw_area = area or item.get("area") or item.get("delegation")
                 category = item.get("category") or item.get("sector") or ""
@@ -518,7 +518,10 @@ async def run_orchestration(
 
         # Phase B: Scrape known websites for email/social
         for company in all_companies:
-            if company.website and not company.website_enriched:
+            # Re-try if never enriched, or if enriched but still missing all contact/social
+            has_contact = company.email or company.facebook_url or company.linkedin_url
+            already_enriched = company.website_enriched and has_contact
+            if company.website and not already_enriched:
                 logger.info(f"Enriching website: {company.website} for {company.name}")
                 web_data = await web_scraper.scrape_website(company.website)
                 if web_data:
