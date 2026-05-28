@@ -14,3 +14,4 @@ levenshtein
 googlemaps
 httpx
 lxml
+dnspython
