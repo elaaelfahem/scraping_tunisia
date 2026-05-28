@@ -29,7 +29,7 @@ from scrapers.ccis_scraper import CCISScraper
 from scrapers.annuario_scraper import AnnuarioScraper
 from scrapers.scribd_scraper import ScribdScraper
 from core.deduplication import DataIntegrator
-from core.filters import filter_companies, sanitize_company_data
+from core.filters import filter_companies, sanitize_company_data, extract_email_from_text
 from core.database import Base, Company
 from sqlalchemy import func
 
@@ -49,6 +49,236 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 # ── Normalization helpers ─────────────────────────────────────────────────
+
+# Tunisian delegation names → canonical form (longest patterns first to avoid partial matches)
+_DELEGATION_LOOKUP: dict[str, str] = {
+    # Greater Tunis / Ariana / Ben Arous / Manouba
+    "les berges du lac": "Les Berges du Lac",
+    "berges du lac": "Les Berges du Lac",
+    "sidi bou saïd": "Sidi Bou Saïd",
+    "sidi bou said": "Sidi Bou Saïd",
+    "el omrane supérieur": "El Omrane Supérieur",
+    "el omrane superieur": "El Omrane Supérieur",
+    "bou mhel el-bassatine": "Bou Mhel el-Bassatine",
+    "hammam chott": "Hammam Chott",
+    "hammam lif": "Hammam Lif",
+    "menzel bourguiba": "Menzel Bourguiba",
+    "la soukra": "La Soukra",
+    "la goulette": "La Goulette",
+    "la manouba": "La Manouba",
+    "la marsa": "La Marsa",
+    "centre ville": "Centre Ville",
+    "cité el khadra": "El Khadra",
+    "bab souika": "Bab Souika",
+    "bab bhar": "Bab Bhar",
+    "ben arous": "Ben Arous",
+    "el menzah": "El Menzah",
+    "el mourouj": "El Mourouj",
+    "el khadra": "El Khadra",
+    "el omrane": "El Omrane",
+    "boumhel": "Bou Mhel el-Bassatine",
+    "bou mhel": "Bou Mhel el-Bassatine",
+    "ezzahra": "Ezzahra",
+    "ez zahra": "Ezzahra",
+    "ennasr": "Ennasr",
+    "ettadhamen": "Ettadhamen",
+    "ettahrir": "Ettahrir",
+    "ezzouhour": "Ezzouhour",
+    "mutuelleville": "Mutuelleville",
+    "montfleury": "Montfleury",
+    "sidi hassine": "Sidi Hassine",
+    "ouardia": "Ouardia",
+    "el kabaria": "El Kabaria",
+    "carthage": "Carthage",
+    "mégrine": "Mégrine",
+    "megrine": "Mégrine",
+    "radès": "Radès",
+    "rades": "Radès",
+    "raoued": "Raoued",
+    "ariana": "Ariana",
+    "den den": "Den Den",
+    "médina": "Médina",
+    "medina": "Médina",
+    "manouba": "La Manouba",
+    "menzah": "El Menzah",
+    "lac 1": "Lac 1",
+    "lac 2": "Lac 2",
+    "marsa": "La Marsa",
+    "soukra": "La Soukra",
+    "goulette": "La Goulette",
+    "lac": "Lac",
+    # Sfax
+    "sfax ville": "Sfax Ville",
+    "sfax sud": "Sfax Sud",
+    "sfax nord": "Sfax Nord",
+    "sfax ouest": "Sfax Ouest",
+    "sakiet eddaïer": "Sakiet Eddaïer",
+    "sakiet eddaier": "Sakiet Eddaïer",
+    "sakiet ezzit": "Sakiet Ezzit",
+    "menzel chaker": "Menzel Chaker",
+    "bir ali ben khalifa": "Bir Ali Ben Khalifa",
+    "jebiniana": "Jebiniana",
+    "el hencha": "El Hencha",
+    "kerkennah": "Kerkennah",
+    "ghraiba": "Ghraiba",
+    "agareb": "Agareb",
+    "skhira": "Skhira",
+    "mahres": "Mahres",
+    "thyna": "Thyna",
+    # Sousse
+    "hammam sousse": "Hammam Sousse",
+    "kalaa kebira": "Kalâat El-Kébira",
+    "kalaa seghira": "Kalâat Es-Seghira",
+    "sidi bou ali": "Sidi Bou Ali",
+    "sidi el hani": "Sidi El Hani",
+    "m'saken": "M'Saken",
+    "msaken": "M'Saken",
+    "akouda": "Akouda",
+    "bouficha": "Bouficha",
+    "enfidha": "Enfidha",
+    "hergla": "Hergla",
+    "kondar": "Kondar",
+    # Nabeul
+    "menzel temime": "Menzel Temime",
+    "menzel bouzelfa": "Menzel Bouzelfa",
+    "dar chaabane": "Dar Chaâbane",
+    "el haouaria": "El Haouaria",
+    "bou argoub": "Bou Argoub",
+    "beni khalled": "Béni Khalled",
+    "grombalia": "Grombalia",
+    "hammamet": "Hammamet",
+    "kelibia": "Kélibia",
+    "soliman": "Soliman",
+    "takelsa": "Takelsa",
+    "nabeul": "Nabeul",
+    "korba": "Korba",
+    # Bizerte
+    "ras jebel": "Ras Jebel",
+    "sejenane": "Séjenane",
+    "ghezala": "Ghézala",
+    "zarzouna": "Zarzouna",
+    "el amar": "El Amar",
+    "joumine": "Joumine",
+    "mateur": "Mateur",
+    "utique": "Utique",
+    "tinja": "Tinja",
+    "rmel": "Rmel",
+    # Monastir
+    "ksar hellal": "Ksar Hellal",
+    "téboulba": "Téboulba",
+    "teboulba": "Téboulba",
+    "zeramdine": "Zéramdine",
+    "bembla": "Bembla",
+    "ouerdanine": "Ouerdanine",
+    "beni hassen": "Béni Hassan",
+    "sahline": "Sahline",
+    "jemmal": "Jemmal",
+    "moknine": "Moknine",
+    "sayada": "Sayada",
+    # Mahdia
+    "ksour essef": "Ksour Essef",
+    "bou merdes": "Bou Merdes",
+    "ouled chamakh": "Ouled Chamakh",
+    "sidi alouane": "Sidi Alouane",
+    "chorbane": "Chorbane",
+    "el jem": "El Jem",
+    # Gabès
+    "el hamma": "El Hamma",
+    "menzel el habib": "Menzel El Habib",
+    "matmata": "Matmata",
+    "mareth": "Mareth",
+    "gabès": "Gabès",
+    "gabes": "Gabès",
+    # Gafsa
+    "metlaoui": "Métlaoui",
+    "redeyef": "Redeyef",
+    "mdhilla": "Mdhilla",
+    "el ksar": "El Ksar",
+    # Kairouan
+    "haffouz": "Haffouz",
+    "nasrallah": "Nasrallah",
+    "el alaa": "El Alaa",
+    "chebika": "Chébika",
+    "sbikha": "Sbikha",
+    # Kasserine
+    "sbeitla": "Sbeitla",
+    "feriana": "Fériana",
+    "foussana": "Foussana",
+    "thala": "Thala",
+    # Jendouba / Béja
+    "ain draham": "Aïn Draham",
+    "tabarka": "Tabarka",
+    "béja": "Béja",
+    "beja": "Béja",
+    # Zaghouan
+    "el fahs": "El Fahs",
+    "zriba": "Zriba",
+    # Kef
+    "le kef": "Le Kef",
+    "dahmani": "Dahmani",
+    "nebeur": "Nebeur",
+    # Médenine / Tataouine
+    "houmt souk": "Houmt Souk",
+    "médenine": "Médenine",
+    "medenine": "Médenine",
+    "ghomrassen": "Ghomrassen",
+    "djerba": "Djerba",
+    "jerba": "Djerba",
+    "midoun": "Midoun",
+    "zarzis": "Zarzis",
+    "remada": "Remada",
+    # Tozeur / Kébili
+    "kébili": "Kébili",
+    "kebili": "Kébili",
+    "tozeur": "Tozeur",
+    "nefta": "Nefta",
+    "degache": "Degache",
+    "douz": "Douz",
+}
+
+# Sorted once, longest first, to avoid shorter patterns masking longer ones
+_DELEGATION_PATTERNS = sorted(_DELEGATION_LOOKUP, key=len, reverse=True)
+
+
+def _extract_area_from_address(address: Optional[str]) -> Optional[str]:
+    """Infer area/delegation from an address string by matching known names."""
+    if not address:
+        return None
+    addr_lower = address.lower()
+    for pattern in _DELEGATION_PATTERNS:
+        if pattern in addr_lower:
+            return _DELEGATION_LOOKUP[pattern]
+    return None
+
+
+# Maps broad search keywords to human-readable sector labels.
+# Used as a fallback when is_all_sectors=True and the scraper returns no category.
+_KEYWORD_TO_SECTOR: dict[str, Optional[str]] = {
+    "Entreprises": None,          # Too generic to be useful
+    "Services": "Services",
+    "Industrie": "Industry",
+    "Commerce": "Commerce",
+    "Boutique": "Retail",
+    "Software": "Information Technology",
+    "Restaurants": "Food & Beverage",
+    "Hotel": "Hospitality",
+    "Transport": "Transport & Logistics",
+    "Construction": "Construction",
+    "Agriculture": "Agriculture",
+    "Santé": "Healthcare",
+    "Education": "Education",
+}
+
+
+def _sector_fallback(keyword: str, is_all_sectors: bool) -> Optional[str]:
+    """Return the best sector label for a keyword.
+    When scraping with a specific sector, use it directly.
+    When scraping All, map keyword to a readable label (or None if too generic).
+    """
+    if not is_all_sectors:
+        return keyword
+    return _KEYWORD_TO_SECTOR.get(keyword)
+
 
 def _normalize_area(area: Optional[str]) -> Optional[str]:
     """Normalize area/delegation names for consistent storage.
@@ -131,13 +361,13 @@ async def run_orchestration(
                 await maps_scraper.search_companies(query, city=city, area=area)
             )
             for item in maps_results:
-                raw_area = area or item.get("area") or item.get("delegation")
+                raw_area = area or item.get("area") or item.get("delegation") or _extract_area_from_address(item.get("address"))
                 category = item.get("category") or item.get("type") or ""
                 integrator.add_or_update_company({
                     "name": item.get("name", ""),
                     "city": city,
                     "area": _normalize_area(raw_area),
-                    "sector": category or (None if is_all_sectors else kw),
+                    "sector": category or _sector_fallback(kw, is_all_sectors),
                     "field": category,  # Maps "type" is the activity field
                     "address": item.get("address", ""),
                     "phone": item.get("phone", ""),
@@ -161,7 +391,7 @@ async def run_orchestration(
         for item in rne_results:
             if not item.get("legal_name"):
                 continue
-            raw_area = area or item.get("area") or item.get("delegation")
+            raw_area = area or item.get("area") or item.get("delegation") or _extract_area_from_address(item.get("address"))
             # Avoid empty registration_number — unique constraint would fail
             reg_num = (item.get("registration_number") or "").strip() or None
             integrator.add_or_update_company({
@@ -171,7 +401,7 @@ async def run_orchestration(
                 "address": item.get("address", ""),
                 "city": city,
                 "area": _normalize_area(raw_area),
-                "sector": item.get("sector") or item.get("category") or (None if is_all_sectors else sector),
+                "sector": item.get("sector") or item.get("category") or _sector_fallback(sector, is_all_sectors),
                 "field": item.get("field") or item.get("activity"),
                 "source_data": {"rne": item},
             })
@@ -183,13 +413,13 @@ async def run_orchestration(
         for kw in BROAD_KEYWORDS[:3]: # Limit for Yellow Pages
             typ_results = filter_companies(typ_scraper.search(kw, city, area, enrich_details=True))
             for item in typ_results:
-                raw_area = area or item.get("area") or item.get("delegation")
+                raw_area = area or item.get("area") or item.get("delegation") or _extract_area_from_address(item.get("address"))
                 category = item.get("category") or item.get("sector") or ""
                 integrator.add_or_update_company({
                     "name": item["name"],
                     "city": city,
                     "area": _normalize_area(raw_area),
-                    "sector": category or (None if is_all_sectors else kw),
+                    "sector": category or _sector_fallback(kw, is_all_sectors),
                     "field": category,
                     "address": item.get("address", ""),
                     "phone": item.get("phone", ""),
@@ -207,13 +437,13 @@ async def run_orchestration(
         for kw in BROAD_KEYWORDS[:2]:
             b2b_results = filter_companies(b2b_scraper.search(kw, city, area))
             for item in b2b_results:
-                raw_area = area or item.get("area") or item.get("delegation")
+                raw_area = area or item.get("area") or item.get("delegation") or _extract_area_from_address(item.get("address"))
                 category = item.get("sector") or item.get("category") or ""
                 integrator.add_or_update_company({
                     "name": item["name"],
                     "city": city,
                     "area": _normalize_area(raw_area),
-                    "sector": category or (None if is_all_sectors else kw),
+                    "sector": category or _sector_fallback(kw, is_all_sectors),
                     "field": category,
                     "address": item.get("address", ""),
                     "phone": item.get("phone", ""),
@@ -231,13 +461,13 @@ async def run_orchestration(
         for kw in BROAD_KEYWORDS[:2]:
             biz_results = filter_companies(biz_scraper.search(kw, city, area))
             for item in biz_results:
-                raw_area = area or item.get("area") or item.get("delegation")
+                raw_area = area or item.get("area") or item.get("delegation") or _extract_area_from_address(item.get("address"))
                 category = item.get("sector") or item.get("category") or ""
                 integrator.add_or_update_company({
                     "name": item["name"],
                     "city": city,
                     "area": _normalize_area(raw_area),
-                    "sector": category or (None if is_all_sectors else kw),
+                    "sector": category or _sector_fallback(kw, is_all_sectors),
                     "field": category,
                     "address": item.get("address", ""),
                     "phone": item.get("phone", ""),
@@ -253,13 +483,13 @@ async def run_orchestration(
         for kw in BROAD_KEYWORDS[:2]:
             kompass_results = filter_companies(kompass_scraper.search(kw, city, area))
             for item in kompass_results:
-                raw_area = area or item.get("area") or item.get("delegation")
+                raw_area = area or item.get("area") or item.get("delegation") or _extract_area_from_address(item.get("address"))
                 category = item.get("sector") or item.get("category") or ""
                 integrator.add_or_update_company({
                     "name": item["name"],
                     "city": city,
                     "area": _normalize_area(raw_area),
-                    "sector": category or (None if is_all_sectors else kw),
+                    "sector": category or _sector_fallback(kw, is_all_sectors),
                     "field": category,
                     "address": item.get("address", ""),
                     "phone": item.get("phone", ""),
@@ -277,13 +507,13 @@ async def run_orchestration(
         for kw in BROAD_KEYWORDS[:2]:
             ti_results = filter_companies(ti_scraper.search(kw, city, area))
             for item in ti_results:
-                raw_area = area or item.get("area") or item.get("delegation")
+                raw_area = area or item.get("area") or item.get("delegation") or _extract_area_from_address(item.get("address"))
                 category = item.get("sector") or item.get("category") or ""
                 integrator.add_or_update_company({
                     "name": item["name"],
                     "city": city,
                     "area": _normalize_area(raw_area),
-                    "sector": category or (None if is_all_sectors else kw),
+                    "sector": category or _sector_fallback(kw, is_all_sectors),
                     "field": category,
                     "address": item.get("address", ""),
                     "phone": item.get("phone", ""),
@@ -298,13 +528,13 @@ async def run_orchestration(
         for kw in BROAD_KEYWORDS[:2]:
             afrikta_results = filter_companies(afrikta_scraper.search(kw, city, area))
             for item in afrikta_results:
-                raw_area = area or item.get("area") or item.get("delegation")
+                raw_area = area or item.get("area") or item.get("delegation") or _extract_area_from_address(item.get("address"))
                 category = item.get("sector") or item.get("category") or ""
                 integrator.add_or_update_company({
                     "name": item["name"],
                     "city": city,
                     "area": _normalize_area(raw_area),
-                    "sector": category or (None if is_all_sectors else kw),
+                    "sector": category or _sector_fallback(kw, is_all_sectors),
                     "field": category,
                     "address": item.get("address", ""),
                     "phone": item.get("phone", ""),
@@ -321,13 +551,13 @@ async def run_orchestration(
         for kw in BROAD_KEYWORDS[:2]:
             tg_results = filter_companies(tg_scraper.search(kw, city, area))
             for item in tg_results:
-                raw_area = area or item.get("area") or item.get("delegation")
+                raw_area = area or item.get("area") or item.get("delegation") or _extract_area_from_address(item.get("address"))
                 category = item.get("sector") or item.get("category") or ""
                 integrator.add_or_update_company({
                     "name": item["name"],
                     "city": city,
                     "area": _normalize_area(raw_area),
-                    "sector": category or (None if is_all_sectors else kw),
+                    "sector": category or _sector_fallback(kw, is_all_sectors),
                     "field": category,
                     "address": item.get("address", ""),
                     "phone": item.get("phone", ""),
@@ -345,13 +575,13 @@ async def run_orchestration(
         for kw in BROAD_KEYWORDS[:2]:
             tind_results = filter_companies(tind_scraper.search(kw, city, area))
             for item in tind_results:
-                raw_area = area or item.get("area") or item.get("city")
+                raw_area = area or item.get("area") or item.get("city") or _extract_area_from_address(item.get("address"))
                 category = item.get("sector") or item.get("category") or ""
                 integrator.add_or_update_company({
                     "name": item["name"],
                     "city": city,
                     "area": _normalize_area(raw_area),
-                    "sector": category or (None if is_all_sectors else kw),
+                    "sector": category or _sector_fallback(kw, is_all_sectors),
                     "field": category,
                     "address": item.get("address", ""),
                     "phone": item.get("phone", ""),
@@ -367,13 +597,13 @@ async def run_orchestration(
         for kw in BROAD_KEYWORDS[:2]:
             b2btn_results = filter_companies(await b2btn_scraper.search(kw, city, area))
             for item in b2btn_results:
-                raw_area = area or item.get("area") or item.get("delegation")
+                raw_area = area or item.get("area") or item.get("delegation") or _extract_area_from_address(item.get("address"))
                 category = item.get("sector") or item.get("category") or ""
                 integrator.add_or_update_company({
                     "name": item["name"],
                     "city": city,
                     "area": _normalize_area(raw_area),
-                    "sector": category or (None if is_all_sectors else kw),
+                    "sector": category or _sector_fallback(kw, is_all_sectors),
                     "field": category,
                     "address": item.get("address", ""),
                     "phone": item.get("phone", ""),
@@ -391,13 +621,13 @@ async def run_orchestration(
         for kw in BROAD_KEYWORDS[:2]:
             tunannu_results = filter_companies(tunannu_scraper.search(kw, city, area))
             for item in tunannu_results:
-                raw_area = area or item.get("area") or item.get("delegation")
+                raw_area = area or item.get("area") or item.get("delegation") or _extract_area_from_address(item.get("address"))
                 category = item.get("sector") or item.get("category") or ""
                 integrator.add_or_update_company({
                     "name": item["name"],
                     "city": city,
                     "area": _normalize_area(raw_area),
-                    "sector": category or (None if is_all_sectors else kw),
+                    "sector": category or _sector_fallback(kw, is_all_sectors),
                     "field": category,
                     "address": item.get("address", ""),
                     "phone": item.get("phone", ""),
@@ -413,13 +643,13 @@ async def run_orchestration(
         for kw in BROAD_KEYWORDS[:2]:
             pagex_results = filter_companies(pagex_scraper.search(kw, city, area))
             for item in pagex_results:
-                raw_area = area or item.get("area") or item.get("delegation")
+                raw_area = area or item.get("area") or item.get("delegation") or _extract_area_from_address(item.get("address"))
                 category = item.get("sector") or item.get("category") or ""
                 integrator.add_or_update_company({
                     "name": item["name"],
                     "city": city,
                     "area": _normalize_area(raw_area),
-                    "sector": category or (None if is_all_sectors else kw),
+                    "sector": category or _sector_fallback(kw, is_all_sectors),
                     "field": category,
                     "address": item.get("address", ""),
                     "phone": item.get("phone", ""),
@@ -435,13 +665,13 @@ async def run_orchestration(
         for kw in BROAD_KEYWORDS[:2]:
             ccis_results = filter_companies(ccis_scraper.search(kw, city, area))
             for item in ccis_results:
-                raw_area = area or item.get("area") or item.get("delegation")
+                raw_area = area or item.get("area") or item.get("delegation") or _extract_area_from_address(item.get("address"))
                 category = item.get("sector") or item.get("category") or ""
                 integrator.add_or_update_company({
                     "name": item["name"],
                     "city": city,
                     "area": _normalize_area(raw_area),
-                    "sector": category or (None if is_all_sectors else kw),
+                    "sector": category or _sector_fallback(kw, is_all_sectors),
                     "field": category,
                     "address": item.get("address", ""),
                     "phone": item.get("phone", ""),
@@ -457,13 +687,13 @@ async def run_orchestration(
         for kw in BROAD_KEYWORDS[:1]:
             ann_results = filter_companies(ann_scraper.search(kw, city, area))
             for item in ann_results:
-                raw_area = area or item.get("area") or item.get("city")
+                raw_area = area or item.get("area") or item.get("city") or _extract_area_from_address(item.get("address"))
                 category = item.get("sector") or item.get("category") or ""
                 integrator.add_or_update_company({
                     "name": item["name"],
                     "city": city,
                     "area": _normalize_area(raw_area),
-                    "sector": category or (None if is_all_sectors else kw),
+                    "sector": category or _sector_fallback(kw, is_all_sectors),
                     "field": category,
                     "address": item.get("address", ""),
                     "phone": item.get("phone", ""),
@@ -480,12 +710,12 @@ async def run_orchestration(
             BROAD_KEYWORDS[0], city, area
         ))
         for item in scribd_results:
-            raw_area = area or item.get("area") or item.get("delegation")
+            raw_area = area or item.get("area") or item.get("delegation") or _extract_area_from_address(item.get("address"))
             integrator.add_or_update_company({
                 "name": item["name"],
                 "city": city,
                 "area": _normalize_area(raw_area),
-                "sector": item.get("sector") or (None if is_all_sectors else sector),
+                "sector": item.get("sector") or _sector_fallback(sector, is_all_sectors),
                 "address": item.get("address", ""),
                 "phone": item.get("phone", ""),
                 "email": item.get("email", ""),
@@ -534,6 +764,14 @@ async def run_orchestration(
                     company.description = company.description or web_data.get("description")
                     company.website_enriched = True
                     company.website_enriched_at = func.now()
+        db.commit()
+
+        # Phase C: extract email from description text if still missing
+        for company in all_companies:
+            if not company.email and company.description:
+                found = extract_email_from_text(company.description)
+                if found:
+                    company.email = found
         db.commit()
 
     # ── Export ───────────────────────────────────────────────────────────────

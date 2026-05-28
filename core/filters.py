@@ -103,6 +103,12 @@ _EMAIL_RE = re.compile(
     r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$"
 )
 
+_EMAIL_IN_TEXT_RE = re.compile(
+    r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b"
+)
+
+_FAKE_EMAIL_DOMAINS = {"example.com", "test.com", "fake.com", "email.com", "none.com"}
+
 
 def sanitize_email(raw: Optional[str]) -> str:
     """Return a cleaned email string or empty string if invalid."""
@@ -115,12 +121,21 @@ def sanitize_email(raw: Optional[str]) -> str:
         return ""
     if not _EMAIL_RE.match(raw):
         return ""
-    # Reject obviously fake domains
-    fake_domains = {"example.com", "test.com", "fake.com", "email.com", "none.com"}
     domain = raw.split("@")[-1]
-    if domain in fake_domains:
+    if domain in _FAKE_EMAIL_DOMAINS:
         return ""
     return raw
+
+
+def extract_email_from_text(text: Optional[str]) -> Optional[str]:
+    """Find the first valid email address buried in free-form text."""
+    if not text or not isinstance(text, str):
+        return None
+    for match in _EMAIL_IN_TEXT_RE.findall(text):
+        cleaned = sanitize_email(match)
+        if cleaned:
+            return cleaned
+    return None
 
 
 # ── Website validation ──────────────────────────────────────────────────────
@@ -161,6 +176,57 @@ def sanitize_address(raw: Optional[str]) -> str:
     return raw
 
 
+# ── Social URL validation ───────────────────────────────────────────────────
+
+# Facebook utility paths that are never company pages
+_FB_JUNK_RE = re.compile(
+    r"facebook\.com/(sharer|share|dialog|plugins|tr\b|pages/create|photo|video|events|groups|hashtag)",
+    re.IGNORECASE,
+)
+
+
+def sanitize_facebook_url(raw: Optional[str]) -> str:
+    """Return a cleaned Facebook page URL or empty string if not a company page."""
+    if not raw or not isinstance(raw, str):
+        return ""
+    raw = raw.strip().rstrip("/")
+    if not raw:
+        return ""
+    if _is_placeholder(raw):
+        return ""
+    # Normalise missing scheme
+    if raw.startswith("facebook.com") or raw.startswith("www.facebook.com"):
+        raw = "https://" + raw
+    if "facebook.com" not in raw.lower():
+        return ""
+    if not raw.startswith(("http://", "https://")):
+        return ""
+    if _FB_JUNK_RE.search(raw):
+        return ""
+    return raw
+
+
+def sanitize_linkedin_url(raw: Optional[str]) -> str:
+    """Return a cleaned LinkedIn company/person URL or empty string."""
+    if not raw or not isinstance(raw, str):
+        return ""
+    raw = raw.strip().rstrip("/")
+    if not raw:
+        return ""
+    if _is_placeholder(raw):
+        return ""
+    if raw.startswith("linkedin.com") or raw.startswith("www.linkedin.com"):
+        raw = "https://" + raw
+    if "linkedin.com" not in raw.lower():
+        return ""
+    if not raw.startswith(("http://", "https://")):
+        return ""
+    # Must be a /company/ or /in/ path — reject bare linkedin.com or /feed etc.
+    if not re.search(r"linkedin\.com/(company|in)/\w", raw, re.IGNORECASE):
+        return ""
+    return raw
+
+
 # ── Master sanitiser ────────────────────────────────────────────────────────
 
 def sanitize_company_data(data: dict) -> dict:
@@ -188,6 +254,16 @@ def sanitize_company_data(data: dict) -> dict:
     for key in ("address",):
         if key in data:
             data[key] = sanitize_address(data.get(key))
+
+    # Social URL fields
+    if "facebook_url" in data:
+        data["facebook_url"] = sanitize_facebook_url(data.get("facebook_url"))
+    if "linkedin_url" in data:
+        data["linkedin_url"] = sanitize_linkedin_url(data.get("linkedin_url"))
+    for key in ("instagram_url", "twitter_url"):
+        val = data.get(key)
+        if val and isinstance(val, str):
+            data[key] = val.strip().rstrip("/")
 
     # Generic string fields: strip and clear if placeholder
     for key in ("sector", "field", "description", "legal_name"):
