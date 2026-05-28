@@ -1,3 +1,4 @@
+
 """
 Scraper for the Tunisian Registre National des Entreprises (RNE).
 
